@@ -1,7 +1,7 @@
 import os
 from typing import List, Dict, Optional, Any
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 from groq import Groq
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,17 +9,19 @@ from fastapi.middleware.cors import CORSMiddleware
 # Import local services
 from services.qdrant_service import QdrantService
 from services.chunking_service import ChunkingService
+from services.resume_parser import extract_text_from_pdf
+from services.llm_metadata_service import LlmMetadataService
 
-# Load environment variables (e.g., GROQ_API_KEY)
+# Load environment variables
 load_dotenv()
 
 # Initialize FastAPI app
-app = FastAPI(title="Groq Chatbot API with RAG")
+app = FastAPI(title="Resume Chatbot API (RAG + Groq)")
 
-# Add CORS middleware to allow requests from the frontend
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust this in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -33,11 +35,23 @@ except Exception as e:
     print(f"Warning: Failed to initialize Groq client: {e}")
     groq_client = None
 
-# Initialize RAG Services
+# Initialize RAG services
 qdrant_service = QdrantService()
 chunking_service = ChunkingService()
+llm_metadata_service = LlmMetadataService(groq_client=groq_client) if groq_client else None
 
-# Pydantic models for request validation
+# Recruiter-mode system prompt
+RECRUITER_SYSTEM_PROMPT = (
+    "You are a professional AI assistant representing a job candidate. "
+    "You are speaking with an HR professional or recruiter. "
+    "Your goal is to present the candidate's experience, skills, and achievements "
+    "in a confident, clear, and positive manner based solely on the context provided. "
+    "If a question is asked that isn't covered in their resume, politely say you don't have "
+    "that information. Do not make up any information. Always be professional and concise."
+)
+
+# ---------- Pydantic Models ----------
+
 class Message(BaseModel):
     role: str
     content: str
@@ -57,76 +71,141 @@ class IngestResponse(BaseModel):
     message: str
     chunks_processed: int
 
+class UploadResumeResponse(BaseModel):
+    message: str
+    chunks_processed: int
+    extracted_metadata: Dict[str, Any]
+
+# ---------- Endpoints ----------
+
+@app.post("/api/upload-resume", response_model=UploadResumeResponse)
+async def upload_resume(file: UploadFile = File(...), replace_existing: bool = Form(default=True)):
+    """
+    Accepts a PDF resume, extracts text, uses the LLM to parse structured metadata
+    (experience, skills, projects), chunks the text, and stores everything in Qdrant.
+    Set replace_existing=true (default) to wipe previous resume data before ingesting.
+    """
+    # Validate file type
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+
+    try:
+        # 1. Read uploaded file bytes
+        file_bytes = await file.read()
+
+        # 2. Extract raw text from PDF
+        resume_text = extract_text_from_pdf(file_bytes)
+        if not resume_text.strip():
+            raise HTTPException(status_code=422, detail="Could not extract text from the PDF. The file may be scanned or image-based.")
+
+        # 3. Use LLM to extract structured metadata
+        if llm_metadata_service:
+            extracted_metadata = llm_metadata_service.extract_resume_metadata(resume_text)
+        else:
+            extracted_metadata = {}
+        
+        # Add file-level metadata
+        extracted_metadata["source"] = file.filename
+        extracted_metadata["document_type"] = "resume"
+
+        # 4. Optionally wipe the collection so only this resume is referenced
+        if replace_existing:
+            qdrant_service.clear_collection()
+
+        # 5. Chunk the resume text, passing the extracted metadata to every chunk
+        processed = chunking_service.process_and_chunk(
+            text=resume_text,
+            source_metadata=extracted_metadata
+        )
+
+        # 6. Upsert into Qdrant
+        qdrant_service.upsert_documents(
+            documents=processed["documents"],
+            metadatas=processed["metadatas"]
+        )
+
+        return {
+            "message": f"Resume '{file.filename}' successfully processed and stored.",
+            "chunks_processed": len(processed["documents"]),
+            "extracted_metadata": extracted_metadata,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Resume processing failed: {str(e)}")
+
+
 @app.post("/api/ingest", response_model=IngestResponse)
 async def ingest_document(request: IngestRequest):
+    """General-purpose text ingestion endpoint."""
     try:
-        # 1. Process and chunk the input text
-        processed_data = chunking_service.process_and_chunk(
-            text=request.text, 
+        processed = chunking_service.process_and_chunk(
+            text=request.text,
             source_metadata=request.metadata
         )
-        
-        # 2. Store the chunks in Qdrant
         qdrant_service.upsert_documents(
-            documents=processed_data["documents"],
-            metadatas=processed_data["metadatas"]
+            documents=processed["documents"],
+            metadatas=processed["metadatas"]
         )
-        
         return {
             "message": "Document successfully ingested and processed.",
-            "chunks_processed": len(processed_data["documents"])
+            "chunks_processed": len(processed["documents"])
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
 
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
+    """
+    RAG-powered chat endpoint. Retrieves relevant resume context from Qdrant,
+    injects it into a recruiter-persona system prompt, then calls Groq.
+    """
     if not groq_client:
         raise HTTPException(
-            status_code=500, 
+            status_code=500,
             detail="Groq API client is not initialized. Please ensure your GROQ_API_KEY is set in the .env file."
         )
-    
+
     try:
-        # Convert Pydantic Message models to dictionaries for the Groq API
         messages_dict = [{"role": msg.role, "content": msg.content} for msg in request.messages]
-        
-        # RAG Implementation: Find the last user message to fetch relevant context
-        last_user_message = next((msg.content for msg in reversed(request.messages) if msg.role == "user"), None)
-        
+
+        # RAG: use the last user message to retrieve context
+        last_user_message = next(
+            (msg.content for msg in reversed(request.messages) if msg.role == "user"), None
+        )
+
+        system_prompt = RECRUITER_SYSTEM_PROMPT
+
         if last_user_message:
-            # 1. Retrieve relevant chunks from Qdrant
-            results = qdrant_service.search(query=last_user_message, limit=3)
-            
-            # 2. Augment the prompt with the retrieved context
+            results = qdrant_service.search(query=last_user_message, limit=4)
             if results:
                 context_texts = "\n---\n".join(
-                    [f"Context Chunk:\n{r['text']}" for r in results]
+                    [f"Resume Excerpt:\n{r['text']}" for r in results]
                 )
-                system_prompt = (
-                    "Use the following additional context to inform your answer. "
-                    f"If it doesn't help, answer normally based on your knowledge:\n\n{context_texts}"
+                system_prompt += (
+                    f"\n\nUse the following excerpts from the candidate's resume to answer the recruiter's question:\n\n{context_texts}"
                 )
-                
-                # Check if there is already a system prompt, update it, or add one.
-                if messages_dict and messages_dict[0]["role"] == "system":
-                    messages_dict[0]["content"] += f"\n\n{system_prompt}"
-                else:
-                    messages_dict.insert(0, {"role": "system", "content": system_prompt})
-        
-        # Call Groq API
+
+        # Inject or replace system prompt
+        if messages_dict and messages_dict[0]["role"] == "system":
+            messages_dict[0]["content"] = system_prompt
+        else:
+            messages_dict.insert(0, {"role": "system", "content": system_prompt})
+
         chat_completion = groq_client.chat.completions.create(
             messages=messages_dict,
             model=request.model,
         )
-        
-        # Extract the bots response
+
         bot_response = chat_completion.choices[0].message.content
         return {"response": bot_response}
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/")
 async def health_check():
-    return {"status": "ok", "message": "Groq Chatbot API with RAG is running"}
+    return {"status": "ok", "message": "Resume Chatbot API with RAG is running"}

@@ -5,3 +5,6 @@ groq
 python-dotenv
 qdrant-client[fastembed]
 langchain-text-splitters
+pywin32
+pypdf
+python-multipart

@@ -1,33 +1,59 @@
-# Environments
+# ── Secrets & Environment ──────────────────────────────────────
 .env
+.env.*
+!.env.example
+
+# ── Python ─────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual Environments ────────────────────────────────────────
 .venv
-env/
 venv/
+env/
 ENV/
 env.bak/
 venv.bak/
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
+# ── Qdrant Local Database ───────────────────────────────────────
+backend/qdrant_data/
 
-# Frontend
+# ── Fastembed Model Cache ───────────────────────────────────────
+# (downloaded automatically on first run, no need to commit)
+local_cache/
+fastembed_cache/
+.cache/
+
+# ── Frontend Build ──────────────────────────────────────────────
 node_modules/
 dist/
 dist-ssr/
 *.local
 
-# Editor directories and files
-.vscode
-.idea
+# ── Logs ────────────────────────────────────────────────────────
+*.log
+logs/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ── Editor ──────────────────────────────────────────────────────
+.vscode/
+.idea/
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
 
-# OS generated files
+# ── OS Generated ────────────────────────────────────────────────
 .DS_Store
 .DS_Store?
 ._*
@@ -35,3 +61,4 @@ dist-ssr/
 .Trashes
 ehthumbs.db
 Thumbs.db
+desktop.ini

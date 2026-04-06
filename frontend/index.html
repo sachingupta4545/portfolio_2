@@ -24,12 +24,16 @@
     <main class="chat-container">
         <header class="chat-header">
             <div class="header-titles">
-                <h1>AI Assistant</h1>
+                <h1>Recruiter Assistant</h1>
                 <div class="status">
                     <span class="status-indicator bubble"></span>
                     <span class="status-text">Online</span>
                 </div>
             </div>
+            <a href="upload.html" class="upload-resume-btn" id="upload-resume-btn" title="Upload a resume PDF">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><polyline points="12 18 12 12"/><polyline points="9 15 12 12 15 15"/></svg>
+                Upload Resume
+            </a>
         </header>
 
         <section class="chat-history" id="chat-history">
@@ -37,7 +41,7 @@
             <div class="message ai-message">
                 <div class="avatar">AI</div>
                 <div class="message-content">
-                    <p>Hello! I'm your intelligent assistant powered by Groq. How can I help you today?</p>
+                    <p>Hello! I'm your <strong>Recruiter Assistant</strong>, powered by Groq + RAG. Upload a resume PDF using the button above, then ask me anything about the candidate — experience, skills, projects, and more!</p>
                 </div>
             </div>
             <!-- Dynamic messages injected here -->

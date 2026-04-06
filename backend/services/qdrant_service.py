@@ -1,56 +1,94 @@
 import os
+import uuid
 from typing import List, Dict, Any
-from qdrant_client import QdrantClient
+from qdrant_client import QdrantClient, models
 
 class QdrantService:
     def __init__(self, collection_name: str = "chatbot_docs"):
         self.collection_name = collection_name
-        # Use local persistent storage by default
-        db_path = os.path.join(os.path.dirname(__file__), "..", "qdrant_data")
-        os.makedirs(db_path, exist_ok=True)
-        
-        # Initialize client with local path
-        self.client = QdrantClient(path=db_path)
-        
-        # Set the fastembed model (downloads it on first run if not cached)
-        self.client.set_model("BAAI/bge-small-en-v1.5")
-    
+
+        qdrant_url = os.environ.get("QDRANT_URL")
+        qdrant_api_key = os.environ.get("QDRANT_API_KEY")
+
+        if qdrant_url:
+            # Use Qdrant Cloud or external instance
+            self.client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key)
+        else:
+            # Fallback to local persistent storage
+            db_path = os.path.join(os.path.dirname(__file__), "..", "qdrant_data")
+            os.makedirs(db_path, exist_ok=True)
+            self.client = QdrantClient(path=db_path)
+
+        # Ensure the collection exists on startup
+        self._ensure_collection()
+
+    def _ensure_collection(self):
+        """Creates the collection if it doesn't already exist."""
+        existing = [c.name for c in self.client.get_collections().collections]
+        if self.collection_name not in existing:
+            self.client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=models.VectorParams(
+                    size=384,  # BAAI/bge-small-en-v1.5 output dimension
+                    distance=models.Distance.COSINE,
+                ),
+            )
+            print(f"Collection '{self.collection_name}' created.")
+
     def upsert_documents(self, documents: List[str], metadatas: List[Dict[str, Any]]):
         """
         Takes raw text chunks and their metadata, generates embeddings using Fastembed,
-        and stores them in Qdrant.
+        and stores them in Qdrant using the modern Document wrapper API.
         """
         if not documents:
             return
-            
-        self.client.add(
+
+        self.client.upsert(
             collection_name=self.collection_name,
-            documents=documents,
-            metadata=metadatas
+            points=[
+                models.PointStruct(
+                    id=str(uuid.uuid4()),
+                    vector=models.Document(text=doc, model="BAAI/bge-small-en-v1.5"),
+                    payload={**meta, "document": doc}
+                )
+                for doc, meta in zip(documents, metadatas)
+            ]
         )
 
-    def search(self, query: str, limit: int = 3) -> List[Dict[str, Any]]:
+    def clear_collection(self):
         """
-        Searches the collection for the closest chunks to the given query.
-        Returns the raw text and metadata.
+        Deletes the collection, wiping all existing data.
+        Ensures it is recreated immediately so it is ready for the next upload.
         """
-        # If collection is empty, this handles the exception gracefully
         try:
-            results = self.client.query(
+            self.client.delete_collection(collection_name=self.collection_name)
+            print(f"Collection '{self.collection_name}' cleared.")
+        except Exception as e:
+            print(f"Note: Could not clear collection (may not exist yet): {e}")
+        # Always recreate so next upsert doesn't fail
+        self._ensure_collection()
+
+
+    def search(self, query: str, limit: int = 4) -> List[Dict[str, Any]]:
+        """
+        Searches for the closest chunks to the given query using the modern query_points API.
+        """
+        try:
+            results = self.client.query_points(
                 collection_name=self.collection_name,
-                query_text=query,
+                query=models.Document(text=query, model="BAAI/bge-small-en-v1.5"),
                 limit=limit
             )
-            
-            # format results for easy consumption
-            formatted_results = []
-            for result in results:
-                formatted_results.append({
-                    "text": result.document,
-                    "metadata": result.metadata,
-                    "score": result.score
+
+            formatted = []
+            for r in results.points:
+                payload = r.payload or {}
+                formatted.append({
+                    "text": payload.get("document", ""),
+                    "metadata": {k: v for k, v in payload.items() if k != "document"},
+                    "score": r.score
                 })
-            return formatted_results
+            return formatted
         except Exception as e:
             print(f"Error during search (collection might be empty): {e}")
             return []
