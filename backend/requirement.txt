@@ -3,3 +3,5 @@ uvicorn
 pydantic
 groq
 python-dotenv
+qdrant-client[fastembed]
+langchain-text-splitters
