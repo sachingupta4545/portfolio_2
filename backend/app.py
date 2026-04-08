@@ -15,6 +15,7 @@ from services.llm_metadata_service import LlmMetadataService
 # Load environment variables
 load_dotenv()
 
+
 # Initialize FastAPI app
 app = FastAPI(title="Resume Chatbot API (RAG + Groq)")
 
