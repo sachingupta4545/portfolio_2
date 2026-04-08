@@ -1,5 +1,6 @@
 import os
 import uuid
+import time
 from typing import List, Dict, Any
 from qdrant_client import QdrantClient, models
 
@@ -11,16 +12,27 @@ class QdrantService:
         qdrant_api_key = os.environ.get("QDRANT_API_KEY")
 
         if qdrant_url:
-            # Use Qdrant Cloud or external instance
-            self.client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key)
+            print(f"🌐 Attempting Qdrant Cloud connection: {qdrant_url}")
+            try:
+                self.client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key)
+                # Test the connection immediately
+                self.client.get_collections()
+                print("✅ Connected to Qdrant Cloud!")
+            except Exception as e:
+                print(f"⚠️  Cloud unreachable ({e}). Falling back to local storage...")
+                self._use_local_storage()
         else:
-            # Fallback to local persistent storage
-            db_path = os.path.join(os.path.dirname(__file__), "..", "qdrant_data")
-            os.makedirs(db_path, exist_ok=True)
-            self.client = QdrantClient(path=db_path)
+            self._use_local_storage()
 
         # Ensure the collection exists on startup
         self._ensure_collection()
+
+    def _use_local_storage(self):
+        """Set up local file-based Qdrant storage."""
+        db_path = os.path.join(os.path.dirname(__file__), "..", "qdrant_data")
+        os.makedirs(db_path, exist_ok=True)
+        self.client = QdrantClient(path=db_path)
+        print("💾 Using local Qdrant storage (qdrant_data/)")
 
     def _ensure_collection(self):
         """Creates the collection if it doesn't already exist."""
@@ -34,6 +46,7 @@ class QdrantService:
                 ),
             )
             print(f"Collection '{self.collection_name}' created.")
+
 
     def upsert_documents(self, documents: List[str], metadatas: List[Dict[str, Any]]):
         """
