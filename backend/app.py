@@ -28,6 +28,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # Initialize Groq client
 try:
     api_key = os.environ.get("GROQ_API_KEY")
