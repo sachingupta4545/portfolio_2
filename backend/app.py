@@ -54,6 +54,7 @@ RECRUITER_SYSTEM_PROMPT = (
 
 # ---------- Pydantic Models ----------
 
+
 class Message(BaseModel):
     role: str
     content: str
