@@ -20,9 +20,14 @@ load_dotenv()
 app = FastAPI(title="Resume Chatbot API (RAG + Groq)")
 
 # Add CORS middleware
+# Replace YOUR_VERCEL_URL with your actual Vercel deployment URL e.g. https://my-chatbot.vercel.app
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost",
+        "http://127.0.0.1",
+        "https://YOUR_VERCEL_URL.vercel.app",  # ← update this after Vercel deploy
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -1,0 +1,20 @@
+# Python virtual environment
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment variables (secrets — never commit!)
+.env
+
+# Local Qdrant data (use Qdrant Cloud in production)
+qdrant_data/
+
+# Development files
+inspect_db.py
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
