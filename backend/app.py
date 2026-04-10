@@ -44,13 +44,14 @@ llm_metadata_service = LlmMetadataService(groq_client=groq_client) if groq_clien
 
 # Recruiter-mode system prompt
 RECRUITER_SYSTEM_PROMPT = (
-    "You are a professional AI assistant representing a job candidate. "
-    "You are speaking with an HR professional or recruiter. "
-    "Your goal is to present the candidate's experience, skills, and achievements "
-    "in a confident, clear, and positive manner based solely on the context provided. "
-    "If a question is asked that isn't covered in their resume, politely say you don't have "
-    "that information. Do not make up any information. Always be professional and concise."
+    "You are a professional AI assistant representing a job candidate to HR professionals and recruiters. "
+    "Answer questions confidently and concisely using ONLY the resume context provided. "
+    "Keep responses under 120 words. Use bullet points for lists of skills or achievements. "
+    "If information is not in the resume, say so briefly. Never fabricate information."
 )
+
+# Max conversation turns to send to the LLM (reduces token usage)
+MAX_HISTORY_MESSAGES = 6
 
 # ---------- Pydantic Models ----------
 
@@ -182,7 +183,7 @@ async def chat_endpoint(request: ChatRequest):
         system_prompt = RECRUITER_SYSTEM_PROMPT
 
         if last_user_message:
-            results = qdrant_service.search(query=last_user_message, limit=4)
+            results = qdrant_service.search(query=last_user_message, limit=3)
             if results:
                 context_texts = "\n---\n".join(
                     [f"Resume Excerpt:\n{r['text']}" for r in results]
@@ -197,9 +198,16 @@ async def chat_endpoint(request: ChatRequest):
         else:
             messages_dict.insert(0, {"role": "system", "content": system_prompt})
 
+        # Trim to sliding window: keep system prompt + last N messages to reduce token usage
+        system_msg = [m for m in messages_dict if m["role"] == "system"]
+        non_system_msgs = [m for m in messages_dict if m["role"] != "system"]
+        trimmed_msgs = system_msg + non_system_msgs[-MAX_HISTORY_MESSAGES:]
+
         chat_completion = groq_client.chat.completions.create(
-            messages=messages_dict,
+            messages=trimmed_msgs,
             model=request.model,
+            max_tokens=512,
+            temperature=0.5,
         )
 
         bot_response = chat_completion.choices[0].message.content
