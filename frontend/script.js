@@ -16,8 +16,7 @@ const statusIndicator = document.querySelector('.status-indicator');
 
 // --- CONSTANTS ---
 // In production (Vercel), this points to your Cloud Run backend.
-// Replace YOUR_CLOUD_RUN_URL with the URL you get after deploying to GCP.
-const PROD_API = 'https://YOUR_CLOUD_RUN_URL/api/chat';
+const PROD_API = 'https://resume-chatbot-904427517105.us-central1.run.app/api/chat';
 const DEV_API  = 'http://127.0.0.1:8000/api/chat';
 const API_URL  = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
     ? DEV_API
