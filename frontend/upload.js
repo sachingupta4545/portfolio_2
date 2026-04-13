@@ -1,4 +1,8 @@
-const API_BASE = "http://localhost:8000";
+const PROD_API_BASE = "https://resume-chatbot-904427517105.us-central1.run.app";
+const DEV_API_BASE = "http://localhost:8000";
+const API_BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') 
+    ? DEV_API_BASE 
+    : PROD_API_BASE;
 
 // Elements
 const dropZone    = document.getElementById("drop-zone");
