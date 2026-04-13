@@ -13,6 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Pre-download the FastEmbed model at build time to prevent Cloud Run cold start delays
+# and Hugging Face rate limits (429 Too Many Requests) at runtime.
+RUN python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5')"
+
 # Copy application source code
 COPY . .
 
