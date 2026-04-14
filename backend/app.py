@@ -10,29 +10,26 @@ from fastapi.middleware.cors import CORSMiddleware
 from services.qdrant_service import QdrantService
 from services.chunking_service import ChunkingService
 from services.resume_parser import extract_text_from_pdf
-from services.llm_metadata_service import LlmMetadataService
+from services.llm_metadata_service import LlmMetadataService, ProjectIngestionService
 
 # Load environment variables
 load_dotenv()
 
-
 # Initialize FastAPI app
 app = FastAPI(title="Resume Chatbot API (RAG + Groq)")
 
-# Add CORS middleware
-# Replace YOUR_VERCEL_URL with your actual Vercel deployment URL e.g. https://my-chatbot.vercel.app
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost",
         "http://127.0.0.1",
-        "https://portfolio-2-iota-dun.vercel.app",  # ← update this after Vercel deploy
+        "https://portfolio-2-iota-dun.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 # Initialize Groq client
 try:
@@ -43,23 +40,31 @@ except Exception as e:
     groq_client = None
 
 # Initialize RAG services
-qdrant_service = QdrantService()
-chunking_service = ChunkingService()
-llm_metadata_service = LlmMetadataService(groq_client=groq_client) if groq_client else None
+qdrant_service        = QdrantService()
+chunking_service      = ChunkingService()
+llm_metadata_service  = LlmMetadataService(groq_client=groq_client)  if groq_client else None
+project_ingest_service = ProjectIngestionService(groq_client=groq_client) if groq_client else None
 
-# Recruiter-mode system prompt
-RECRUITER_SYSTEM_PROMPT = (
-    "You are a professional AI assistant representing a job candidate to HR professionals and recruiters. "
-    "Answer questions confidently and concisely using ONLY the resume context provided. "
-    "Keep responses under 120 words. Use bullet points for lists of skills or achievements. "
-    "If information is not in the resume, say so briefly. Never fabricate information."
+# ---------- System Prompt ----------
+
+SYSTEM_PROMPT = (
+    "You are an intelligent AI assistant representing a software engineer and developer. "
+    "You have two modes:\n"
+    "1. RECRUITER MODE: When answering general HR/recruiter questions about experience, "
+    "skills, education, or background — be confident, concise, and professional. "
+    "Use bullet points where helpful. Keep general answers under 150 words.\n"
+    "2. TECHNICAL MODE: When asked about a specific project's architecture, database design, "
+    "API design, core logic, challenges, or implementation details — switch to a Senior "
+    "Engineer mode. Give thorough, structured technical explanations using the context provided. "
+    "Use headers and bullet points. Do NOT truncate technical answers.\n"
+    "In BOTH modes: Answer using ONLY the context provided. "
+    "If information is not in the context, say so honestly. Never fabricate."
 )
 
-# Max conversation turns to send to the LLM (reduces token usage)
+# Max non-system conversation turns kept in sliding window
 MAX_HISTORY_MESSAGES = 6
 
 # ---------- Pydantic Models ----------
-
 
 class Message(BaseModel):
     role: str
@@ -72,70 +77,95 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     response: str
 
-class IngestRequest(BaseModel):
-    text: str
-    metadata: Optional[Dict[str, Any]] = None
-
-class IngestResponse(BaseModel):
-    message: str
-    chunks_processed: int
-
 class UploadResumeResponse(BaseModel):
     message: str
     chunks_processed: int
     extracted_metadata: Dict[str, Any]
 
-# ---------- Endpoints ----------
+class UploadProjectResponse(BaseModel):
+    message: str
+    project_name: str
+    chunks_processed: int
+
+# ---------- Helper: read text from an uploaded file ----------
+
+async def _read_file_text(file: UploadFile) -> str:
+    """
+    Reads raw text from .pdf, .md, or .txt uploads.
+    Raises HTTPException on unsupported types or empty content.
+    """
+    filename_lower = file.filename.lower()
+    file_bytes = await file.read()
+
+    if filename_lower.endswith(".pdf"):
+        text = extract_text_from_pdf(file_bytes)
+    elif filename_lower.endswith((".md", ".txt")):
+        text = file_bytes.decode("utf-8", errors="ignore")
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Please upload a .pdf, .md, or .txt file."
+        )
+
+    if not text.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="Could not extract text from the file. The file may be empty or image-based."
+        )
+    return text
+
+# =====================================================================
+# API 1  —  /api/upload-resume
+# =====================================================================
 
 @app.post("/api/upload-resume", response_model=UploadResumeResponse)
-async def upload_resume(file: UploadFile = File(...), replace_existing: bool = Form(default=True)):
+async def upload_resume(
+    file: UploadFile = File(...),
+    replace_existing: bool = Form(default=True)
+):
     """
-    Accepts a PDF resume, extracts text, uses the LLM to parse structured metadata
-    (experience, skills, projects), chunks the text, and stores everything in Qdrant.
-    Set replace_existing=true (default) to wipe previous resume data before ingesting.
-    """
-    # Validate file type
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+    Upload your main resume (PDF, MD, or TXT).
 
+    The LLM extracts:
+      - Profile (name, contact, summary)
+      - Full tech stack + categorised tools (languages, frameworks, DevOps, cloud …)
+      - Work experience with date-computed total years
+      - Education & certifications
+      - High-level project summaries
+
+    Use replace_existing=true (default) to wipe the database before ingesting
+    so that stale resume data is removed.
+    Deep project details should be uploaded separately via /api/upload-project.
+    """
     try:
-        # 1. Read uploaded file bytes
-        file_bytes = await file.read()
+        resume_text = await _read_file_text(file)
 
-        # 2. Extract raw text from PDF
-        resume_text = extract_text_from_pdf(file_bytes)
-        if not resume_text.strip():
-            raise HTTPException(status_code=422, detail="Could not extract text from the PDF. The file may be scanned or image-based.")
-
-        # 3. Use LLM to extract structured metadata
+        # LLM metadata extraction
         if llm_metadata_service:
             extracted_metadata = llm_metadata_service.extract_resume_metadata(resume_text)
         else:
             extracted_metadata = {}
-        
-        # Add file-level metadata
-        extracted_metadata["source"] = file.filename
+
+        extracted_metadata["source"]        = file.filename
         extracted_metadata["document_type"] = "resume"
 
-        # 4. Optionally wipe the collection so only this resume is referenced
+        # Optionally wipe the collection
         if replace_existing:
             qdrant_service.clear_collection()
 
-        # 5. Chunk the resume text, passing the extracted metadata to every chunk
+        # Chunk + upsert
         processed = chunking_service.process_and_chunk(
             text=resume_text,
             source_metadata=extracted_metadata
         )
-
-        # 6. Upsert into Qdrant
         qdrant_service.upsert_documents(
             documents=processed["documents"],
             metadatas=processed["metadatas"]
         )
 
         return {
-            "message": f"Resume '{file.filename}' successfully processed and stored.",
-            "chunks_processed": len(processed["documents"]),
+            "message":            f"Resume '{file.filename}' processed and stored successfully.",
+            "chunks_processed":   len(processed["documents"]),
             "extracted_metadata": extracted_metadata,
         }
 
@@ -145,73 +175,130 @@ async def upload_resume(file: UploadFile = File(...), replace_existing: bool = F
         raise HTTPException(status_code=500, detail=f"Resume processing failed: {str(e)}")
 
 
-@app.post("/api/ingest", response_model=IngestResponse)
-async def ingest_document(request: IngestRequest):
-    """General-purpose text ingestion endpoint."""
+# =====================================================================
+# API 2  —  /api/upload-project
+# =====================================================================
+
+@app.post("/api/upload-project", response_model=UploadProjectResponse)
+async def upload_project(
+    file: UploadFile = File(...),
+):
+    """
+    Upload a detailed project document (PDF, MD, or TXT) for ONE project.
+
+    The document should describe the project in depth — the more detail you
+    include, the better the chatbot can answer technical questions.
+
+    Suggested sections to include in your file:
+      - Overview / Purpose
+      - Tech Stack (backend, frontend, database, infra, third-party)
+      - Features
+      - Architecture (flow + components)
+      - Database Design
+      - API Design
+      - Core Logic
+      - Edge Cases
+      - Challenges & How They Were Solved
+      - Optimizations
+      - Deployment
+      - Future Improvements
+
+    Data is APPENDED to the existing vector database — it does NOT wipe your resume.
+    You can call this endpoint multiple times for different projects.
+    """
     try:
-        processed = chunking_service.process_and_chunk(
-            text=request.text,
-            source_metadata=request.metadata
+        project_text = await _read_file_text(file)
+
+        # LLM deep extraction
+        if project_ingest_service:
+            project_data = project_ingest_service.extract_project_metadata(project_text)
+        else:
+            raise HTTPException(status_code=500, detail="Groq client not initialized.")
+
+        if not project_data:
+            raise HTTPException(
+                status_code=422,
+                detail="Could not extract project information from the file. "
+                       "Ensure the document describes a project clearly."
+            )
+
+        project_data["source"]        = file.filename
+        project_data["document_type"] = "project"
+
+        # Chunk into 3 sub-chunks and APPEND (no wipe)
+        processed = chunking_service.process_deep_project(
+            project_data=project_data,
+            source_filename=file.filename
         )
         qdrant_service.upsert_documents(
             documents=processed["documents"],
             metadatas=processed["metadatas"]
         )
-        return {
-            "message": "Document successfully ingested and processed.",
-            "chunks_processed": len(processed["documents"])
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
 
+        project_name = project_data.get("project_name") or "Unknown Project"
+        return {
+            "message":          f"Project '{project_name}' processed and stored successfully.",
+            "project_name":     project_name,
+            "chunks_processed": len(processed["documents"]),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Project ingestion failed: {str(e)}")
+
+
+# =====================================================================
+# Chat endpoint
+# =====================================================================
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     """
-    RAG-powered chat endpoint. Retrieves relevant resume context from Qdrant,
-    injects it into a recruiter-persona system prompt, then calls Groq.
+    RAG-powered chat endpoint.
+    Retrieves up to 6 relevant chunks from Qdrant (covering both resume and
+    deep project data), injects them into the system prompt, and calls Groq.
     """
     if not groq_client:
         raise HTTPException(
             status_code=500,
-            detail="Groq API client is not initialized. Please ensure your GROQ_API_KEY is set in the .env file."
+            detail="Groq API client is not initialized. Ensure GROQ_API_KEY is set."
         )
 
     try:
         messages_dict = [{"role": msg.role, "content": msg.content} for msg in request.messages]
 
-        # RAG: use the last user message to retrieve context
         last_user_message = next(
             (msg.content for msg in reversed(request.messages) if msg.role == "user"), None
         )
 
-        system_prompt = RECRUITER_SYSTEM_PROMPT
+        system_prompt = SYSTEM_PROMPT
 
         if last_user_message:
-            results = qdrant_service.search(query=last_user_message, limit=3)
+            results = qdrant_service.search(query=last_user_message, limit=6)
             if results:
                 context_texts = "\n---\n".join(
-                    [f"Resume Excerpt:\n{r['text']}" for r in results]
+                    [f"Context [{i+1}]:\n{r['text']}" for i, r in enumerate(results)]
                 )
                 system_prompt += (
-                    f"\n\nUse the following excerpts from the candidate's resume to answer the recruiter's question:\n\n{context_texts}"
+                    f"\n\nUse the following context from the candidate's documents to answer:\n\n{context_texts}"
                 )
 
-        # Inject or replace system prompt
+        # Inject / replace system prompt
         if messages_dict and messages_dict[0]["role"] == "system":
             messages_dict[0]["content"] = system_prompt
         else:
             messages_dict.insert(0, {"role": "system", "content": system_prompt})
 
-        # Trim to sliding window: keep system prompt + last N messages to reduce token usage
-        system_msg = [m for m in messages_dict if m["role"] == "system"]
-        non_system_msgs = [m for m in messages_dict if m["role"] != "system"]
-        trimmed_msgs = system_msg + non_system_msgs[-MAX_HISTORY_MESSAGES:]
+        # Sliding window
+        system_msg    = [m for m in messages_dict if m["role"] == "system"]
+        non_system    = [m for m in messages_dict if m["role"] != "system"]
+        trimmed_msgs  = system_msg + non_system[-MAX_HISTORY_MESSAGES:]
 
         chat_completion = groq_client.chat.completions.create(
             messages=trimmed_msgs,
             model=request.model,
-            max_tokens=512,
+            max_tokens=1024,
             temperature=0.5,
         )
 
@@ -222,6 +309,30 @@ async def chat_endpoint(request: ChatRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# =====================================================================
+# General ingest (kept for backward compat)
+# =====================================================================
+
+@app.post("/api/ingest")
+async def ingest_document(request: dict):
+    """General-purpose text ingestion (legacy endpoint)."""
+    try:
+        text = request.get("text", "")
+        metadata = request.get("metadata")
+        processed = chunking_service.process_and_chunk(text=text, source_metadata=metadata)
+        qdrant_service.upsert_documents(
+            documents=processed["documents"],
+            metadatas=processed["metadatas"]
+        )
+        return {"message": "Document ingested.", "chunks_processed": len(processed["documents"])}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
+
+
+# =====================================================================
+# Health check
+# =====================================================================
+
 @app.get("/")
 async def health_check():
-    return {"status": "ok", "message": "Resume Chatbot API with RAG is running"}
+    return {"status": "ok", "message": "Resume Chatbot API with Two-API RAG is running"}
